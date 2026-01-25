@@ -48,6 +48,15 @@ def sync_sales_order(payload, request_id=None):
 			)
 			return
 
+	# Skip orders that are fully fulfilled
+	fulfillment_status = order.get("fulfillment_status")
+	if fulfillment_status and str(fulfillment_status).lower() == "fulfilled":
+		create_shopify_log(
+			status="Skipped",
+			message=f"Order {order.get('id')} skipped: fulfillment status is 'fulfilled'",
+		)
+		return
+
 	try:
 		shopify_customer = order.get("customer") if order.get("customer") is not None else {}
 		shopify_customer["billing_address"] = order.get("billing_address", "")
@@ -227,6 +236,9 @@ def _format_line_item_properties(line_item) -> str:
 		value = ("" if value is None else cstr(value)).strip()
 		value = value or "NONE"
 
+		# Maintain Hack Smith Item Property / Item Property Value metadata
+		_sync_item_property_metadata(name, value)
+
 		formatted_properties.append(f"{name}: {value}")
 
 	# Join with comma and space, no newlines
@@ -245,6 +257,73 @@ def _build_properties_map(line_items: list[dict]) -> dict[str, str]:
 		properties_map[item_code] = _format_line_item_properties(shopify_item)
 
 	return properties_map
+
+
+def _sync_item_property_metadata(property_name: str, property_value: str) -> None:
+	"""Ensure Hack Smith Item Property / Item Property Value records exist and are linked.
+
+	This keeps `Item Property` and `Item Property Value` doctypes in sync with
+	the Shopify line item properties we store on Sales Order Item.custom_properties.
+
+	Rules:
+	- Skip technical properties starting with '_' (e.g. `_cl_options`).
+	- Create Item Property (property_name) if missing.
+	- Create Item Property Value (value) if missing.
+	- Ensure the Item Property Value's Table MultiSelect `property` contains
+	  a link row to this Item Property.
+	"""
+
+	# Skip internal / technical keys
+	if not property_name or property_name.startswith("_"):
+		return
+
+	try:
+		# 1) Ensure Item Property exists
+		item_property_name = frappe.db.get_value(
+			"Item Property", {"property_name": property_name}, "name"
+		)
+
+		if not item_property_name:
+			item_property_doc = frappe.get_doc(
+				{
+					"doctype": "Item Property",
+					"property_name": property_name,
+				}
+			)
+			item_property_doc.insert(ignore_permissions=True)
+			item_property_name = item_property_doc.name
+
+		# 2) Ensure Item Property Value exists
+		value_doc_name = frappe.db.get_value(
+			"Item Property Value", {"value": property_value}, "name"
+		)
+
+		if not value_doc_name:
+			value_doc = frappe.get_doc(
+				{
+					"doctype": "Item Property Value",
+					"value": property_value,
+				}
+			)
+			# Link this value to the property
+			value_doc.append("property", {"property": item_property_name})
+			value_doc.insert(ignore_permissions=True)
+			return
+
+		# 3) If value already exists, ensure it is linked to this property
+		value_doc = frappe.get_doc("Item Property Value", value_doc_name)
+		existing_links = {row.property for row in value_doc.get("property") or []}
+
+		if item_property_name not in existing_links:
+			value_doc.append("property", {"property": item_property_name})
+			value_doc.save(ignore_permissions=True)
+
+	except Exception:
+		# Don't break order sync if metadata sync fails; just log the error.
+		frappe.log_error(
+			frappe.get_traceback(),
+			"Shopify Item Property Metadata Sync Failed",
+		)
 
 
 def _order_has_syncable_item_group(items: list[dict]) -> bool:
@@ -496,6 +575,14 @@ def sync_sales_order_update(payload, request_id=None):
 	sales_order_name = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: order_id}, "name")
 	if not sales_order_name:
 		setting = frappe.get_cached_doc(SETTING_DOCTYPE)
+		# Skip if order is fully fulfilled
+		fulfillment_status = order.get("fulfillment_status")
+		if fulfillment_status and str(fulfillment_status).lower() == "fulfilled":
+			create_shopify_log(
+				status="Skipped",
+				message=f"Sales Order for Shopify order {order_id} not created: fulfillment status is 'fulfilled'",
+			)
+			return
 		# If only_sync_paid_orders is enabled and order is now paid, create it
 		if cint(setting.only_sync_paid_orders) and order.get("financial_status") == "paid":
 			create_shopify_log(
