@@ -166,6 +166,9 @@ doc_events = {
 		"on_update": "ecommerce_integrations.shopify.work_order.tag_shopify_order_in_production",
 		# "on_change": "ecommerce_integrations.shopify.work_order.update_sales_order_manufacture_status",
 	},
+	"Comment": {
+		"after_insert": "ecommerce_integrations.shopify.order.extract_kickstarter_from_comment_and_update_so",
+	},
 }
 
 # Scheduled Tasks
