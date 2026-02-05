@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Literal, Optional
 
 import frappe
@@ -716,6 +717,12 @@ SHOPIFY_ORDER_METAFIELDS_TO_SYNC = [
 	{"namespace": "custom", "key": "kickstarter_backer_number_smith_blade_campaign"},
 ]
 
+# Pattern to extract Kickstarter Backer number from comment content (e.g. "Order Note: Kickstarter Backer #: 30977")
+KICKSTARTER_BACKER_PATTERN = re.compile(
+	r"Kickstarter\s+Backer\s*#\s*:?\s*([\d,]+)",
+	re.IGNORECASE,
+)
+
 
 def _fill_metafields_into_doc(doc, metafields):
 	"""Fill Sales Order custom_shopify_order_metafield child table from Shopify metafields list."""
@@ -796,9 +803,24 @@ def sync_shopify_order_metafields(sales_order_name):
 
 
 @frappe.whitelist()
+def queue_bulk_sync_shopify_order_metafields(from_date, to_date):
+	"""Queue bulk sync of Shopify order metafields to run in the background (~15 min timeout)."""
+	frappe.enqueue(
+		method="ecommerce_integrations.shopify.order.bulk_sync_shopify_order_metafields",
+		queue="long",
+		timeout=900,
+		is_async=True,
+		job_name=f"shopify_bulk_sync_metafields_{from_date}_{to_date}",
+		from_date=from_date,
+		to_date=to_date,
+	)
+	return {"ok": True, "message": _("Bulk sync job queued. It will run in the background (up to ~15 min).")}
+
+
 def bulk_sync_shopify_order_metafields(from_date, to_date):
 	"""Bulk sync Shopify order metafields for Sales Orders in the given date range.
 	Returns { "ok": True, "synced": N, "failed": N, "failed_orders": [...], "message": "..." }.
+	Can be called directly or via queue_bulk_sync_shopify_order_metafields (background).
 	"""
 	from frappe.utils import getdate
 
@@ -845,10 +867,85 @@ def bulk_sync_shopify_order_metafields(from_date, to_date):
 
 	frappe.db.commit()
 	msg = _("Synced {0} order(s). {1} failed.").format(synced, failed)
-	return {
+	result = {
 		"ok": True,
 		"synced": synced,
 		"failed": failed,
 		"failed_orders": failed_orders,
 		"message": msg,
 	}
+	create_shopify_log(
+		method="bulk_sync_shopify_order_metafields",
+		status="Success" if failed == 0 else "Partial Success",
+		message=msg,
+		request_data={"from_date": str(from_date), "to_date": str(to_date), "synced": synced, "failed": failed},
+	)
+	return result
+
+
+def extract_kickstarter_from_comment_and_update_so(comment_doc, method=None):
+	"""When a comment is added to a Sales Order with content like 'Order Note: Kickstarter Backer #: 30977',
+	extract the number and add/update the metafield row in custom_shopify_order_metafield if not already present.
+	"""
+	if comment_doc.reference_doctype != "Sales Order" or not comment_doc.reference_name:
+		return
+	content = (comment_doc.content or "").strip()
+	if "Kickstarter Backer" not in content and "kickstarter backer" not in content.lower():
+		return
+
+	match = KICKSTARTER_BACKER_PATTERN.search(content)
+	if not match:
+		return
+
+	value = match.group(1).replace(",", "").strip()
+	if not value:
+		return
+
+	try:
+		so_doc = frappe.get_doc("Sales Order", comment_doc.reference_name)
+	except frappe.DoesNotExistError:
+		return
+
+	if not hasattr(so_doc, "custom_shopify_order_metafield"):
+		return
+
+	# Check if we already have this value for the kickstarter metafield
+	key = "kickstarter_backer_number_smith_blade_campaign"
+	ns = "custom"
+	existing = [
+		row for row in (so_doc.get("custom_shopify_order_metafield") or [])
+		if (row.get("metafield") == key or row.get("metafield") == "Kickstarter Backer")
+		and str(row.get("value", "")).replace(",", "") == value
+	]
+	if existing:
+		return
+
+	# Update existing row with same key, or append new row (silently, without triggering SO update hooks)
+	rows = so_doc.get("custom_shopify_order_metafield") or []
+	updated = False
+	for row in rows:
+		if row.get("metafield") == key or row.get("metafield") == "Kickstarter Backer":
+			# Silent in-place update of child row value
+			frappe.db.set_value(
+				"Order Metafield",
+				row.name,
+				"value",
+				value,
+				update_modified=False,
+			)
+			updated = True
+			break
+	if not updated:
+		# Insert child row directly, without saving parent Sales Order
+		child = frappe.get_doc(
+			{
+				"doctype": "Order Metafield",
+				"parenttype": "Sales Order",
+				"parent": so_doc.name,
+				"parentfield": "custom_shopify_order_metafield",
+				"namespace": ns,
+				"metafield": key,
+				"value": value,
+			}
+		)
+		child.insert(ignore_permissions=True)

@@ -51,7 +51,7 @@ def is_synced(
 	sku: str | None = None,
 ) -> bool:
 	"""Check if item is synced from integration.
-	
+
 	Args:
 		integration: Integration name (e.g., "shopify")
 		integration_item_code: Shopify product_id
@@ -94,7 +94,7 @@ def get_erpnext_item(
 	has_variants: int | None = 0,
 ):
 	"""Get ERPNext item for specified ecommerce_item.
-	
+
 	Uses product_id (integration_item_code) + variant_id as primary lookup.
 	SKU is no longer used for lookup - items can share SKUs.
 
