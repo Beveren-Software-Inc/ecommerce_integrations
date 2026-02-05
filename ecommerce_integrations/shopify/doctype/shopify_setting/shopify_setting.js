@@ -127,13 +127,13 @@ function show_bulk_sync_metafields_dialog() {
 		primary_action: function (values) {
 			d.hide();
 			frappe.call({
-				method: "ecommerce_integrations.shopify.order.bulk_sync_shopify_order_metafields",
+				method: "ecommerce_integrations.shopify.order.queue_bulk_sync_shopify_order_metafields",
 				args: {
 					from_date: values.from_date,
 					to_date: values.to_date,
 				},
 				freeze: true,
-				freeze_message: __("Syncing metafields for Sales Orders..."),
+				freeze_message: __("Queuing bulk sync job..."),
 				callback: function (r) {
 					if (r.exc) {
 						frappe.msgprint({
@@ -152,17 +152,10 @@ function show_bulk_sync_metafields_dialog() {
 						});
 						return;
 					}
-					let msg = data.message || __("Done.");
-					if (data.failed_orders && data.failed_orders.length > 0) {
-						msg += "<br><br>" + __("Failed orders:") + "<br>";
-						msg += data.failed_orders
-							.map((f) => `${f.name}: ${f.error}`)
-							.join("<br>");
-					}
 					frappe.msgprint({
 						title: __("Bulk Sync Metafields"),
-						indicator: data.failed === 0 ? "green" : "orange",
-						message: msg,
+						indicator: "blue",
+						message: data.message || __("Job queued. Check Ecommerce Integration Log for results."),
 					});
 				},
 			});

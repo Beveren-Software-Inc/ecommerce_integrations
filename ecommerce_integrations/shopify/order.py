@@ -803,9 +803,24 @@ def sync_shopify_order_metafields(sales_order_name):
 
 
 @frappe.whitelist()
+def queue_bulk_sync_shopify_order_metafields(from_date, to_date):
+	"""Queue bulk sync of Shopify order metafields to run in the background (~15 min timeout)."""
+	frappe.enqueue(
+		method="ecommerce_integrations.shopify.order.bulk_sync_shopify_order_metafields",
+		queue="long",
+		timeout=900,
+		is_async=True,
+		job_name=f"shopify_bulk_sync_metafields_{from_date}_{to_date}",
+		from_date=from_date,
+		to_date=to_date,
+	)
+	return {"ok": True, "message": _("Bulk sync job queued. It will run in the background (up to ~15 min).")}
+
+
 def bulk_sync_shopify_order_metafields(from_date, to_date):
 	"""Bulk sync Shopify order metafields for Sales Orders in the given date range.
 	Returns { "ok": True, "synced": N, "failed": N, "failed_orders": [...], "message": "..." }.
+	Can be called directly or via queue_bulk_sync_shopify_order_metafields (background).
 	"""
 	from frappe.utils import getdate
 
@@ -852,13 +867,20 @@ def bulk_sync_shopify_order_metafields(from_date, to_date):
 
 	frappe.db.commit()
 	msg = _("Synced {0} order(s). {1} failed.").format(synced, failed)
-	return {
+	result = {
 		"ok": True,
 		"synced": synced,
 		"failed": failed,
 		"failed_orders": failed_orders,
 		"message": msg,
 	}
+	create_shopify_log(
+		method="bulk_sync_shopify_order_metafields",
+		status="Success" if failed == 0 else "Partial Success",
+		message=msg,
+		request_data={"from_date": str(from_date), "to_date": str(to_date), "synced": synced, "failed": failed},
+	)
+	return result
 
 
 def extract_kickstarter_from_comment_and_update_so(comment_doc, method=None):
